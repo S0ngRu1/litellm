@@ -441,7 +441,9 @@ def update_messages_with_model_file_ids(
                 for c in content:
                     if c["type"] == "file":
                         file_object = cast(ChatCompletionFileObject, c)
-                        file_object_file_field = file_object["file"]
+                        file_object_file_field = file_object.get("file")
+                        if file_object_file_field is None:
+                            continue
                         file_id = file_object_file_field.get("file_id")
                         format = file_object_file_field.get(
                             "format", get_format_from_file_id(file_id)
@@ -1049,7 +1051,9 @@ def get_file_ids_from_messages(messages: List[AllMessageValues]) -> List[str]:
                 for c in content:
                     if c["type"] == "file":
                         file_object = cast(ChatCompletionFileObject, c)
-                        file_object_file_field = file_object["file"]
+                        file_object_file_field = file_object.get("file")
+                        if file_object_file_field is None:
+                            continue
                         file_id = file_object_file_field.get("file_id")
                         if file_id:
                             file_ids.append(file_id)

@@ -4681,7 +4681,13 @@ class BedrockConverseMessagesProcessor:
 
     @staticmethod
     def _process_file_message(message: ChatCompletionFileObject) -> BedrockContentBlock:
-        file_message = message["file"]
+        file_message = message.get("file")
+        if file_message is None:
+            raise litellm.BadRequestError(
+                message="Content block has type='file' but is missing the required 'file' field",
+                model="",
+                llm_provider="bedrock",
+            )
         file_data = file_message.get("file_data")
         file_id = file_message.get("file_id")
 
@@ -4702,7 +4708,13 @@ class BedrockConverseMessagesProcessor:
     async def _async_process_file_message(
         message: ChatCompletionFileObject,
     ) -> BedrockContentBlock:
-        file_message = message["file"]
+        file_message = message.get("file")
+        if file_message is None:
+            raise litellm.BadRequestError(
+                message="Content block has type='file' but is missing the required 'file' field",
+                model="",
+                llm_provider="bedrock",
+            )
         file_data = file_message.get("file_data")
         file_id = file_message.get("file_id")
         format = file_message.get("format")
