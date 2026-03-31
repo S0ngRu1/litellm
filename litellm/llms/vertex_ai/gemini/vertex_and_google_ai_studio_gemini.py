@@ -2513,6 +2513,7 @@ async def make_call(
         streaming_response=response.aiter_lines(),
         sync_stream=False,
         logging_obj=logging_obj,
+        response=response,
     )
     # LOGGING
     logging_obj.post_call(
@@ -2555,6 +2556,7 @@ def make_sync_call(
         streaming_response=response.iter_lines(),
         sync_stream=True,
         logging_obj=logging_obj,
+        response=response,
     )
 
     # LOGGING
@@ -3011,13 +3013,19 @@ class VertexLLM(VertexBase):
 
 class ModelResponseIterator:
     def __init__(
-        self, streaming_response, sync_stream: bool, logging_obj: LoggingClass
+        self,
+        streaming_response,
+        sync_stream: bool,
+        logging_obj: LoggingClass,
+        response: Optional[httpx.Response] = None,
     ):
         from litellm.litellm_core_utils.prompt_templates.common_utils import (
             check_is_function_call,
         )
 
         self.streaming_response = streaming_response
+        self.sync_stream = sync_stream
+        self.response: Optional[httpx.Response] = response
         self.chunk_type: Literal["valid_json", "accumulated_json"] = "valid_json"
         self.accumulated_json = ""
         self.sent_first_chunk = False
@@ -3245,3 +3253,79 @@ class ModelResponseIterator:
             raise StopAsyncIteration
         except ValueError as e:
             raise RuntimeError(f"Error parsing chunk: {e},\nReceived chunk: {chunk}")
+
+    async def aclose(self) -> None:
+        """
+        Close the underlying async iterator and HTTP response, if present.
+
+        This is invoked by CustomStreamWrapper.aclose to ensure streaming
+        connections are properly released even when callers abort early.
+        """
+        # Close self.streaming_response directly — it is always set from __init__
+        # and represents the aiter_lines() generator.  This covers the early-abort
+        # path where __aiter__ was never called (async_response_iterator is None).
+        try:
+            streaming = self.streaming_response
+            if streaming is not None and hasattr(streaming, "aclose"):
+                await streaming.aclose()
+        except Exception as e:
+            verbose_logger.debug(
+                "ModelResponseIterator.aclose: error closing streaming_response: %s",
+                e,
+            )
+
+        # Also close async_response_iterator if it was produced by __aiter__,
+        # in case it is a different object than streaming_response.
+        try:
+            async_iter = getattr(self, "async_response_iterator", None)
+            if async_iter is not None and async_iter is not self.streaming_response and hasattr(async_iter, "aclose"):
+                await async_iter.aclose()
+        except Exception as e:
+            verbose_logger.debug(
+                "ModelResponseIterator.aclose: error closing async_response_iterator: %s",
+                e,
+            )
+
+        # Close the underlying httpx.Response if available
+        try:
+            if self.response is not None:
+                resp = self.response
+                # Prefer async close when available
+                if hasattr(resp, "aclose") and not getattr(resp, "is_closed", False):
+                    await resp.aclose()  # type: ignore[func-returns-value]
+                elif hasattr(resp, "close"):
+                    resp.close()  # sync close
+        except Exception as e:
+            verbose_logger.debug(
+                "ModelResponseIterator.aclose: error closing response: %s",
+                e,
+            )
+
+    def close(self) -> None:
+        """
+        Synchronous close hook used for non-async streaming (iter_lines()).
+        """
+        # Close the sync iterator if it exposes close()
+        try:
+            iterator = getattr(self, "response_iterator", None)
+            if iterator is not None and hasattr(iterator, "close"):
+                iterator.close()
+        except Exception as e:
+            verbose_logger.debug(
+                "ModelResponseIterator.close: error closing response_iterator: %s",
+                e,
+            )
+
+        # Close the underlying response synchronously when possible
+        try:
+            if (
+                self.response is not None
+                and hasattr(self.response, "close")
+                and not getattr(self.response, "is_closed", False)
+            ):
+                self.response.close()
+        except Exception as e:
+            verbose_logger.debug(
+                "ModelResponseIterator.close: error closing response: %s",
+                e,
+            )
