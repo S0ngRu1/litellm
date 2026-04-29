@@ -1206,6 +1206,32 @@ def test_process_gemini_media():
         mime_type="image/jpeg", file_uri="gs://bucket/image"
     )
 
+    # Test gs url without extension using mime_type from image_url object
+    image_message = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "gs://bucket/image-without-extension",
+                        "mime_type": "image/png",
+                    },
+                }
+            ],
+        }
+    ]
+    from litellm.llms.vertex_ai.gemini.transformation import (
+        _gemini_convert_messages_with_history,
+    )
+
+    converted = _gemini_convert_messages_with_history(
+        messages=image_message, model="gemini-2.5-flash"
+    )
+    assert converted[0]["parts"][0]["file_data"] == FileDataType(
+        mime_type="image/png", file_uri="gs://bucket/image-without-extension"
+    )
+
     # Test HTTPS JPG URL
     https_result = _process_gemini_media("https://example.com/image.jpg")
     print("https_result JPG", https_result)
@@ -1241,6 +1267,13 @@ def test_process_gemini_media():
     print("base64_result", base64_result)
     assert base64_result["inline_data"]["mime_type"] == "image/jpeg"
     assert base64_result["inline_data"]["data"] == "/9j/4AAQSkZJRg..."
+
+
+def test_process_gemini_media_gcs_without_extension_raises_clear_error():
+    with pytest.raises(litellm.BadRequestError) as exc_info:
+        _process_gemini_media("gs://bucket/image-without-extension")
+
+    assert "Unable to determine mime type for gs URI" in str(exc_info.value)
 
 
 def test_get_image_mime_type_from_url():

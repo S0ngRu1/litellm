@@ -190,18 +190,32 @@ def _process_gemini_media(
     try:
         # GCS URIs
         if "gs://" in image_url:
-            # Figure out file type
             extension_with_dot = os.path.splitext(image_url)[-1]  # Ex: ".png"
             extension = extension_with_dot[1:]  # Ex: "png"
 
             if not format:
-                file_type = get_file_type_from_extension(extension)
+                mime_type: Optional[str] = None
+                # For extension-less gs:// URIs, we cannot infer from path.
+                # If callers pass `format`/`mime_type`, this branch is skipped.
+                if extension:
+                    file_type = get_file_type_from_extension(extension)
 
-                # Validate the file type is supported by Gemini
-                if not is_gemini_1_5_accepted_file_type(file_type):
-                    raise Exception(f"File type not supported by gemini - {file_type}")
+                    # Validate the file type is supported by Gemini
+                    if not is_gemini_1_5_accepted_file_type(file_type):
+                        raise Exception(f"File type not supported by gemini - {file_type}")
 
-                mime_type = get_file_mime_type_for_file_type(file_type)
+                    mime_type = get_file_mime_type_for_file_type(file_type)
+                else:
+                    raise litellm.BadRequestError(
+                        message=(
+                            f"Unable to determine mime type for gs URI: {image_url}. "
+                            "This gs:// URI has no file extension. Set it explicitly "
+                            "using image_url.format (or image_url.mime_type/content_type) "
+                            "or message.content[].file.format."
+                        ),
+                        model=model,
+                        llm_provider="vertex_ai",
+                    )
             else:
                 mime_type = format
             file_data = FileDataType(mime_type=mime_type, file_uri=image_url)
@@ -338,7 +352,11 @@ def _gemini_convert_messages_with_history(  # noqa: PLR0915
                             media_resolution_enum: Optional[Dict[str, str]] = None
                             if isinstance(img_element["image_url"], dict):
                                 image_url = img_element["image_url"]["url"]
-                                format = img_element["image_url"].get("format")
+                                format = (
+                                    img_element["image_url"].get("format")
+                                    or img_element["image_url"].get("mime_type")
+                                    or img_element["image_url"].get("content_type")
+                                )
                                 detail = img_element["image_url"].get("detail")
                                 media_resolution_enum = (
                                     _convert_detail_to_media_resolution_enum(detail)
