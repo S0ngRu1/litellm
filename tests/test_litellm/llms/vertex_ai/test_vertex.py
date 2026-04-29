@@ -1281,7 +1281,7 @@ def test_process_gemini_media_gcs_without_extension_uses_gcs_metadata():
     from litellm.types.llms.vertex_ai import FileDataType
 
     with patch(
-        "litellm.llms.vertex_ai.gemini.transformation._get_gcs_content_type",
+        "litellm.llms.vertex_ai.gemini.transformation._get_gcs_object_content_type",
         return_value="image/jpeg",
     ):
         result = _process_gemini_media("gs://bucket/image-without-extension")

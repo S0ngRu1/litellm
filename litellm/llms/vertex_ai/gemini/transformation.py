@@ -804,11 +804,11 @@ def _transform_request_body(  # noqa: PLR0915
     try:
         if custom_llm_provider == "gemini":
             content = litellm.GoogleAIStudioGeminiConfig()._transform_messages(
-                messages=messages, model=model
+                messages=messages, model=model, litellm_params=litellm_params
             )
         else:
             content = litellm.VertexGeminiConfig()._transform_messages(
-                messages=messages, model=model
+                messages=messages, model=model, litellm_params=litellm_params
             )
         tools: Optional[Tools] = optional_params.pop("tools", None)
         tool_choice: Optional[ToolConfig] = optional_params.pop("tool_choice", None)
