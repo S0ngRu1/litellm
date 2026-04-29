@@ -6,7 +6,8 @@ Why separate file? Make it easy to see how transformation works
 
 import json
 import os
-from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union, cast
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel
@@ -55,6 +56,7 @@ from ..common_utils import (
     get_supports_response_schema,
     get_supports_system_message,
 )
+from ..vertex_llm_base import VertexBase
 
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.litellm_logging import Logging as _LiteLLMLoggingObj
@@ -168,12 +170,62 @@ def _apply_gemini_3_metadata(
     return cast(PartType, part_dict)
 
 
+def _parse_gs_uri(gs_uri: str) -> Tuple[str, str]:
+    uri_without_scheme = gs_uri[5:]  # drop gs://
+    uri_parts = uri_without_scheme.split("/", 1)
+    if len(uri_parts) != 2 or not uri_parts[0] or not uri_parts[1]:
+        raise ValueError(f"Invalid gs URI: {gs_uri}")
+    return uri_parts[0], uri_parts[1]
+
+
+def _get_gcs_object_content_type(
+    image_url: str,
+    vertex_project: Optional[str] = None,
+    vertex_credentials: Optional[Any] = None,
+) -> Optional[str]:
+    """
+    Resolve content type from GCS object metadata.
+    """
+    try:
+        bucket, object_name = _parse_gs_uri(image_url)
+    except ValueError:
+        return None
+
+    headers: Dict[str, str] = {}
+    try:
+        access_token, _ = VertexBase().get_access_token(
+            credentials=vertex_credentials,
+            project_id=vertex_project,
+        )
+        headers["Authorization"] = f"Bearer {access_token}"
+    except Exception:
+        # Metadata may still be readable for public objects.
+        pass
+
+    object_path = quote(object_name, safe="")
+    metadata_url = (
+        f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{object_path}"
+        "?fields=contentType"
+    )
+    try:
+        response = httpx.get(url=metadata_url, headers=headers, timeout=5.0)
+        response.raise_for_status()
+        content_type = response.json().get("contentType")
+        if isinstance(content_type, str) and len(content_type) > 0:
+            return content_type
+    except Exception:
+        return None
+    return None
+
+
 def _process_gemini_media(
     image_url: str,
     format: Optional[str] = None,
     media_resolution_enum: Optional[Dict[str, str]] = None,
     model: Optional[str] = None,
     video_metadata: Optional[Dict[str, Any]] = None,
+    vertex_project: Optional[str] = None,
+    vertex_credentials: Optional[Any] = None,
 ) -> PartType:
     """
     Given a media URL (image, audio, or video), return the appropriate PartType for Gemini
@@ -206,16 +258,23 @@ def _process_gemini_media(
 
                     mime_type = get_file_mime_type_for_file_type(file_type)
                 else:
-                    raise litellm.BadRequestError(
-                        message=(
-                            f"Unable to determine mime type for gs URI: {image_url}. "
-                            "This gs:// URI has no file extension. Set it explicitly "
-                            "using image_url.format (or image_url.mime_type/content_type) "
-                            "or message.content[].file.format."
-                        ),
-                        model=model,
-                        llm_provider="vertex_ai",
+                    mime_type = _get_gcs_object_content_type(
+                        image_url=image_url,
+                        vertex_project=vertex_project,
+                        vertex_credentials=vertex_credentials,
                     )
+                    if mime_type is None:
+                        raise litellm.BadRequestError(
+                            message=(
+                                f"Unable to determine mime type for gs URI: {image_url}. "
+                                "This gs:// URI has no file extension and GCS metadata "
+                                "lookup failed. Set it explicitly using image_url.format "
+                                "(or image_url.mime_type/content_type) or "
+                                "message.content[].file.format."
+                            ),
+                            model=model,
+                            llm_provider="vertex_ai",
+                        )
             else:
                 mime_type = format
             file_data = FileDataType(mime_type=mime_type, file_uri=image_url)
@@ -310,6 +369,7 @@ def check_if_part_exists_in_parts(
 def _gemini_convert_messages_with_history(  # noqa: PLR0915
     messages: List[AllMessageValues],
     model: Optional[str] = None,
+    litellm_params: Optional[dict] = None,
 ) -> List[ContentType]:
     """
     Converts given messages from OpenAI format to Gemini format
@@ -325,6 +385,16 @@ def _gemini_convert_messages_with_history(  # noqa: PLR0915
 
     msg_i = 0
     tool_call_responses = []
+    vertex_project = None
+    vertex_credentials = None
+    if litellm_params:
+        vertex_project = litellm_params.get("vertex_project") or litellm_params.get(
+            "vertex_ai_project"
+        )
+        vertex_credentials = litellm_params.get(
+            "vertex_credentials"
+        ) or litellm_params.get("vertex_ai_credentials")
+
     try:
         while msg_i < len(messages):
             user_content: List[PartType] = []
@@ -368,6 +438,8 @@ def _gemini_convert_messages_with_history(  # noqa: PLR0915
                                 format=format,
                                 media_resolution_enum=media_resolution_enum,
                                 model=model,
+                                vertex_project=vertex_project,
+                                vertex_credentials=vertex_credentials,
                             )
                             _parts.append(_part)
                         elif element["type"] == "input_audio":
@@ -393,6 +465,8 @@ def _gemini_convert_messages_with_history(  # noqa: PLR0915
                                     image_url=openai_image_str,
                                     format=audio_format_modified,
                                     model=model,
+                                    vertex_project=vertex_project,
+                                    vertex_credentials=vertex_credentials,
                                 )
                                 _parts.append(_part)
                         elif element["type"] == "file":
@@ -421,6 +495,8 @@ def _gemini_convert_messages_with_history(  # noqa: PLR0915
                                     model=model,
                                     media_resolution_enum=media_resolution_enum,
                                     video_metadata=video_metadata,
+                                    vertex_project=vertex_project,
+                                    vertex_credentials=vertex_credentials,
                                 )
                                 _parts.append(_part)
                             except Exception as e:
@@ -554,6 +630,8 @@ def _gemini_convert_messages_with_history(  # noqa: PLR0915
                                         format=format,
                                         media_resolution_enum=media_resolution_enum,
                                         model=model,
+                                        vertex_project=vertex_project,
+                                        vertex_credentials=vertex_credentials,
                                     )
                                     assistant_content.append(_part)
 

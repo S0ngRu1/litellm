@@ -1276,6 +1276,21 @@ def test_process_gemini_media_gcs_without_extension_raises_clear_error():
     assert "Unable to determine mime type for gs URI" in str(exc_info.value)
 
 
+def test_process_gemini_media_gcs_without_extension_uses_gcs_metadata():
+    from litellm.llms.vertex_ai.gemini.transformation import _process_gemini_media
+    from litellm.types.llms.vertex_ai import FileDataType
+
+    with patch(
+        "litellm.llms.vertex_ai.gemini.transformation._get_gcs_content_type",
+        return_value="image/jpeg",
+    ):
+        result = _process_gemini_media("gs://bucket/image-without-extension")
+
+    assert result["file_data"] == FileDataType(
+        mime_type="image/jpeg", file_uri="gs://bucket/image-without-extension"
+    )
+
+
 def test_get_image_mime_type_from_url():
     """Test the _get_image_mime_type_from_url function for different image URLs"""
     from litellm.llms.vertex_ai.gemini.transformation import (
