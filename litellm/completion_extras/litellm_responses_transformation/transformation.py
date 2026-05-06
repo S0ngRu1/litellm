@@ -6,6 +6,7 @@ import json
 import os
 from typing import (
     TYPE_CHECKING,
+    AbstractSet,
     Any,
     AsyncIterator,
     Callable,
@@ -97,7 +98,7 @@ def _build_reasoning_item(
 
 
 def _reasoning_item_to_response_input(
-    r_item: Union[ChatCompletionReasoningItem, Dict[str, Any]]
+    r_item: Union[ChatCompletionReasoningItem, Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Convert a stored ChatCompletionReasoningItem back to a Responses API input item."""
     r_input: Dict[str, Any] = {
@@ -106,8 +107,9 @@ def _reasoning_item_to_response_input(
         # summary is always required by the Responses API, even when empty
         "summary": r_item.get("summary") or [],
     }
-    if r_item.get("encrypted_content"):
-        r_input["encrypted_content"] = r_item["encrypted_content"]
+    encrypted_content = r_item.get("encrypted_content")
+    if encrypted_content:
+        r_input["encrypted_content"] = encrypted_content
     return r_input
 
 
@@ -1067,6 +1069,9 @@ class OpenAiResponsesToChatCompletionStreamIterator(BaseModelResponseIterator):
         self, streaming_response, sync_stream: bool, json_mode: Optional[bool] = False
     ):
         super().__init__(streaming_response, sync_stream, json_mode)
+        # output_index values that received response.function_call_arguments.delta events.
+        # response.completed must not re-emit full tool_calls for those indices (duplicate args).
+        self._streamed_argument_delta_output_indices: set[int] = set()
 
     def _handle_string_chunk(
         self, str_line: Union[str, "BaseModel"]
@@ -1090,12 +1095,16 @@ class OpenAiResponsesToChatCompletionStreamIterator(BaseModelResponseIterator):
     @staticmethod
     def translate_responses_chunk_to_openai_stream(  # noqa: PLR0915
         parsed_chunk: Union[dict, BaseModel],
+        streamed_argument_delta_output_indices: Optional[AbstractSet[int]] = None,
     ) -> "ModelResponseStream":
         """
         Translate a Responses API streaming chunk to OpenAI chat completion streaming format.
 
         Args:
             parsed_chunk: Dict containing the Responses API event chunk
+            streamed_argument_delta_output_indices: output_index values that already received
+                response.function_call_arguments.delta; response.completed must not re-emit
+                full tool_calls for those indices (avoids duplicate merged args).
 
         Returns:
             ModelResponseStream: OpenAI-formatted streaming chunk
@@ -1311,12 +1320,13 @@ class OpenAiResponsesToChatCompletionStreamIterator(BaseModelResponseIterator):
             output_items = response_data.get("output", []) if response_data else []
 
             has_function_calls = any(
-                item.get("type") == "function_call"
+                isinstance(item, dict) and item.get("type") == "function_call"
                 for item in output_items
-                if isinstance(item, dict)
             )
 
             finish_reason = "tool_calls" if has_function_calls else "stop"
+
+            delta_indices = streamed_argument_delta_output_indices or frozenset()
 
             # Extract reasoning items with encrypted_content for round-tripping
             completed_reasoning_items: Optional[List[Dict[str, Any]]] = None
@@ -1346,14 +1356,75 @@ class OpenAiResponsesToChatCompletionStreamIterator(BaseModelResponseIterator):
                         response_data.get("usage")
                     )
                 )
+
+            # Build terminal tool_calls only for function_call output entries that did not
+            # stream argument deltas yet (tracked by output_index).
+            # Keep tool_call.index aligned with response.output position (output_index).
+            delta: Delta
+            if has_function_calls:
+                tool_call_chunks: List[ChatCompletionToolCallChunk] = []
+                for output_index, item in enumerate(output_items):
+                    if (
+                        not isinstance(item, dict)
+                        or item.get("type") != "function_call"
+                    ):
+                        continue
+                    if output_index in delta_indices:
+                        continue
+                    provider_specific_fields = item.get("provider_specific_fields")
+                    if provider_specific_fields and not isinstance(
+                        provider_specific_fields, dict
+                    ):
+                        provider_specific_fields = (
+                            dict(provider_specific_fields)
+                            if hasattr(provider_specific_fields, "__dict__")
+                            else {}
+                        )
+
+                    function_chunk = ChatCompletionToolCallFunctionChunk(
+                        name=item.get("name", None),
+                        arguments=item.get("arguments", "") or "",
+                    )
+
+                    if provider_specific_fields:
+                        function_chunk["provider_specific_fields"] = (
+                            provider_specific_fields
+                        )
+
+                    tool_call_chunk = ChatCompletionToolCallChunk(
+                        id=item.get("call_id") or item.get("id"),
+                        index=output_index,
+                        type="function",
+                        function=function_chunk,
+                    )
+
+                    if provider_specific_fields:
+                        tool_call_chunk.provider_specific_fields = provider_specific_fields  # type: ignore
+
+                    tool_call_chunks.append(tool_call_chunk)
+
+                if tool_call_chunks:
+                    delta = Delta(
+                        content="",
+                        tool_calls=tool_call_chunks,
+                        reasoning_items=completed_reasoning_items_typed,
+                    )
+                else:
+                    delta = Delta(
+                        content="",
+                        reasoning_items=completed_reasoning_items_typed,
+                    )
+            else:
+                delta = Delta(
+                    content="",
+                    reasoning_items=completed_reasoning_items_typed,
+                )
+
             return ModelResponseStream(
                 choices=[
                     StreamingChoices(
                         index=0,
-                        delta=Delta(
-                            content="",
-                            reasoning_items=completed_reasoning_items_typed,
-                        ),
+                        delta=delta,
                         finish_reason=finish_reason,
                     )
                 ],
@@ -1390,6 +1461,17 @@ class OpenAiResponsesToChatCompletionStreamIterator(BaseModelResponseIterator):
         verbose_logger.debug(
             f"Chat provider: transform_streaming_response called with chunk: {chunk}"
         )
+
+        chunk_dict = chunk
+        event_type = chunk_dict.get("type")
+        if isinstance(event_type, ResponsesAPIStreamEvents):
+            event_type = event_type.value
+        if event_type == "response.function_call_arguments.delta":
+            self._streamed_argument_delta_output_indices.add(
+                int(chunk_dict.get("output_index", 0))
+            )
+
         return OpenAiResponsesToChatCompletionStreamIterator.translate_responses_chunk_to_openai_stream(
-            chunk
+            chunk_dict,
+            streamed_argument_delta_output_indices=self._streamed_argument_delta_output_indices,
         )

@@ -735,6 +735,164 @@ def test_response_completed_with_function_calls_emits_tool_calls_finish_reason()
     assert (
         result.choices[0].finish_reason == "tool_calls"
     ), "response.completed with function_call output should emit finish_reason='tool_calls'"
+    delta = result.choices[0].delta
+    assert delta.tool_calls and len(delta.tool_calls) == 1
+    tc = delta.tool_calls[0]
+    assert tc.id == "call_abc123"
+    assert tc.function.name == "read_file"
+    assert tc.function.arguments == '{"path": "/tmp/test.py"}'
+
+
+def test_response_completed_emits_parallel_tool_calls_without_argument_deltas():
+    """
+    Regression: some providers (e.g. Azure GPT-5.x) stream only through to
+    response.completed with full function_call items and never emit
+    response.function_call_arguments.delta. Clients must still receive tool_calls
+    on the terminal chunk.
+    """
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=None, sync_stream=True
+    )
+    iterator.chunk_parser(
+        {"type": "response.created", "response": {"id": "resp_x", "status": "in_progress"}}
+    )
+    result = iterator.chunk_parser(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_x",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_weather",
+                        "name": "get_weather",
+                        "arguments": '{"location":"北京","unit":"celsius"}',
+                        "status": "completed",
+                    },
+                    {
+                        "type": "function_call",
+                        "id": "fc_2",
+                        "call_id": "call_search",
+                        "name": "search_web",
+                        "arguments": '{"query":"AI news","max_results":5}',
+                        "status": "completed",
+                    },
+                ],
+            },
+        }
+    )
+
+    assert result.choices[0].finish_reason == "tool_calls"
+    tcs = result.choices[0].delta.tool_calls
+    assert tcs is not None and len(tcs) == 2
+    assert tcs[0].index == 0 and tcs[0].id == "call_weather"
+    assert tcs[0].function.name == "get_weather"
+    assert "北京" in tcs[0].function.arguments
+    assert tcs[1].index == 1 and tcs[1].id == "call_search"
+    assert tcs[1].function.name == "search_web"
+    assert "AI news" in tcs[1].function.arguments
+
+
+def test_response_completed_tool_calls_use_output_array_indices_not_fc_only_indices():
+    """
+    Terminal chunk tool_calls must use each item's index in response.output, not
+    0..n-1 over function_call items only (so a leading message does not shift indices).
+    """
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=None, sync_stream=True
+    )
+    result = iterator.chunk_parser(
+        {
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_a",
+                        "name": "a",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_b",
+                        "name": "b",
+                        "arguments": "{}",
+                    },
+                ],
+            },
+        }
+    )
+    tcs = result.choices[0].delta.tool_calls
+    assert tcs is not None and len(tcs) == 2
+    assert tcs[0].index == 1 and tcs[0].function.name == "a"
+    assert tcs[1].index == 2 and tcs[1].function.name == "b"
+
+
+def test_response_completed_supplements_only_tool_calls_without_argument_deltas():
+    """
+    Per-output_index tracking: if one call streamed argument deltas and another did not,
+    the terminal chunk must still emit the full tool_call for the index without deltas.
+    """
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator,
+    )
+
+    iterator = OpenAiResponsesToChatCompletionStreamIterator(
+        streaming_response=None, sync_stream=True
+    )
+    iterator.chunk_parser(
+        {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "delta": '{"x":1}',
+        }
+    )
+    result = iterator.chunk_parser(
+        {
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "first",
+                        "arguments": '{"x":1}',
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_2",
+                        "name": "second",
+                        "arguments": '{"y":2}',
+                    },
+                ],
+            },
+        }
+    )
+    assert result.choices[0].finish_reason == "tool_calls"
+    tcs = result.choices[0].delta.tool_calls
+    assert tcs is not None and len(tcs) == 1
+    assert tcs[0].index == 1
+    assert tcs[0].id == "call_2"
+    assert tcs[0].function.name == "second"
+    assert '"y":2' in tcs[0].function.arguments
 
 
 def test_response_completed_with_message_only_emits_stop_finish_reason():
@@ -1630,6 +1788,7 @@ def test_multi_tool_call_stream_no_premature_finish():
         # 2: first tool call arguments delta
         {
             "type": "response.function_call_arguments.delta",
+            "output_index": 0,
             "delta": '{"path":"/etc/hostname"}',
         },
         # 3: first tool call done  ← must NOT emit finish_reason
@@ -1648,7 +1807,11 @@ def test_multi_tool_call_stream_no_premature_finish():
             "item": {"type": "function_call", "name": "list_dir", "call_id": "call_2"},
         },
         # 5: second tool call arguments delta
-        {"type": "response.function_call_arguments.delta", "delta": '{"path":"/tmp"}'},
+        {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 1,
+            "delta": '{"path":"/tmp"}',
+        },
         # 6: second tool call done  ← must NOT emit finish_reason
         {
             "type": "response.output_item.done",
@@ -1733,6 +1896,10 @@ def test_multi_tool_call_stream_no_premature_finish():
     assert (
         completed_result.choices[0].finish_reason == "tool_calls"
     ), "response.completed with function_call outputs must emit finish_reason='tool_calls'"
+    assert not completed_result.choices[0].delta.tool_calls, (
+        "response.completed must not re-emit tool_calls when arguments were streamed "
+        "(would duplicate merged tool_calls / arguments)"
+    )
 
     # 5. No chunk before the last one should have finish_reason set
     for idx, r in enumerate(results[:-1]):
@@ -2043,6 +2210,11 @@ def test_parallel_tool_calls_comprehensive_streaming_integration():
     assert (
         finish_events[0][1] == "tool_calls"
     ), f"Terminal finish_reason must be 'tool_calls', got '{finish_events[0][1]}'"
+    final_r = results[-1]
+    assert final_r is not None and final_r.choices
+    assert not final_r.choices[0].delta.tool_calls, (
+        "response.completed must not duplicate tool_calls when deltas already streamed"
+    )
 
     # 5. Parallel tool calls have distinct indices matching output_index (0 and 1)
     # Collect indices from output_item.added chunks only (they carry the call id)
