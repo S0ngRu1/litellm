@@ -52,6 +52,7 @@ class ManusResponsesAPIConfig(OpenAIResponsesAPIConfig):
         model: Optional[str],
         stream: Optional[bool],
         custom_llm_provider: Optional[str] = None,
+        litellm_params: Optional[Any] = None,
     ) -> bool:
         """
         Manus API doesn't support real-time streaming.

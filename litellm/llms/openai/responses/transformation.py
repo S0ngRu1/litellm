@@ -28,6 +28,36 @@ else:
     LiteLLMLoggingObj = Any
 
 
+def _deployment_model_info_from_litellm_params(
+    litellm_params: Optional[Any],
+) -> Optional[Dict[str, Any]]:
+    """Resolve proxy/router ``model_info`` from ``litellm_params`` (dict or Pydantic)."""
+    if litellm_params is None:
+        return None
+    mi: Any
+    if isinstance(litellm_params, dict):
+        mi = litellm_params.get("model_info")
+    else:
+        mi = getattr(litellm_params, "model_info", None)
+    if mi is None:
+        return None
+    if isinstance(mi, dict):
+        return mi
+    # Pydantic v2/v1; getattr may return non-callable stubs on some objects—skip quietly.
+    for dump_method_name in ("model_dump", "dict"):
+        dump_fn = getattr(mi, dump_method_name, None)
+        if not callable(dump_fn):
+            continue
+        try:
+            dumped = dump_fn()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            # Intentionally broad: model_dump()/dict() can raise for incompatible objects.
+            continue
+    return None
+
+
 class OpenAIResponsesAPIConfig(BaseResponsesAPIConfig):
     @property
     def custom_llm_provider(self) -> LlmProviders:
@@ -383,15 +413,20 @@ class OpenAIResponsesAPIConfig(BaseResponsesAPIConfig):
         model: Optional[str],
         stream: Optional[bool],
         custom_llm_provider: Optional[str] = None,
+        litellm_params: Optional[Any] = None,
     ) -> bool:
         if stream is not True:
             return False
+        deployment_model_info = _deployment_model_info_from_litellm_params(
+            litellm_params
+        )
         if model is not None:
             try:
                 if (
                     litellm.utils.supports_native_streaming(
                         model=model,
                         custom_llm_provider=custom_llm_provider,
+                        deployment_model_info=deployment_model_info,
                     )
                     is False
                 ):

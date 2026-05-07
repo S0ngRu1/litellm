@@ -31,6 +31,118 @@ class TestOpenAIResponsesAPIConfig:
         self.model = "gpt-4o"
         self.logging_obj = MagicMock()
 
+    def test_should_fake_stream_respects_litellm_params_model_info_true(self):
+        """Proxy config model_info.supports_native_streaming=True forces native stream."""
+        lp = GenericLiteLLMParams(
+            model_info={"supports_native_streaming": True},
+        )
+        assert (
+            self.config.should_fake_stream(
+                model="unknown-model-xyz-not-in-cost-map",
+                stream=True,
+                custom_llm_provider="openai",
+                litellm_params=lp,
+            )
+            is False
+        )
+
+    def test_should_fake_stream_respects_litellm_params_model_info_false(self):
+        """Proxy config model_info.supports_native_streaming=False forces fake stream."""
+        lp = GenericLiteLLMParams(
+            model_info={"supports_native_streaming": False},
+        )
+        assert (
+            self.config.should_fake_stream(
+                model="unknown-model-xyz-not-in-cost-map",
+                stream=True,
+                custom_llm_provider="openai",
+                litellm_params=lp,
+            )
+            is True
+        )
+
+    @patch("litellm.responses.main.base_llm_http_handler.response_api_handler")
+    def test_responses_passes_model_info_into_response_api_handler_fake_stream(
+        self, mock_response_api_handler: MagicMock
+    ):
+        """Regression: responses() must pass litellm_params into should_fake_stream (fake_stream kwarg)."""
+        import litellm
+
+        mock_response_api_handler.return_value = MagicMock()
+        logging_obj = MagicMock()
+        litellm.responses(
+            input="hello",
+            model="gpt-4o",
+            stream=True,
+            api_key="sk-test-not-real",
+            model_info={"supports_native_streaming": False},
+            litellm_logging_obj=logging_obj,
+        )
+        assert mock_response_api_handler.call_args is not None
+        assert (
+            mock_response_api_handler.call_args.kwargs.get("fake_stream") is True
+        )
+
+    @patch("litellm.responses.main.base_llm_http_handler.response_api_handler")
+    def test_responses_model_info_native_true_sets_fake_stream_false(
+        self, mock_response_api_handler: MagicMock
+    ):
+        import litellm
+
+        mock_response_api_handler.return_value = MagicMock()
+        litellm.responses(
+            input="hello",
+            model="gpt-4o",
+            stream=True,
+            api_key="sk-test-not-real",
+            model_info={"supports_native_streaming": True},
+            litellm_logging_obj=MagicMock(),
+        )
+        assert (
+            mock_response_api_handler.call_args.kwargs.get("fake_stream") is False
+        )
+
+    def test_supports_native_streaming_override_parses_string_false(self):
+        """Regression: str 'false' must not use bool() (which would be True for non-empty str)."""
+        from litellm.utils import supports_native_streaming
+
+        assert (
+            supports_native_streaming(
+                "unknown-model-xyz",
+                "openai",
+                {"supports_native_streaming": "false"},
+            )
+            is False
+        )
+
+    def test_supports_native_streaming_override_parses_string_true(self):
+        from litellm.utils import supports_native_streaming
+
+        assert (
+            supports_native_streaming(
+                "unknown-model-xyz",
+                "openai",
+                {"supports_native_streaming": "true"},
+            )
+            is True
+        )
+
+    def test_supports_native_streaming_unrecognized_string_falls_back_to_model_cost(
+        self,
+    ):
+        from litellm.utils import supports_native_streaming
+
+        with patch("litellm.utils._get_model_info_helper") as m:
+            m.return_value = {"supports_native_streaming": True}
+            assert (
+                supports_native_streaming(
+                    "gpt-4o",
+                    "openai",
+                    {"supports_native_streaming": "not-a-bool"},
+                )
+                is True
+            )
+
     def test_map_openai_params(self):
         """Test that parameters are correctly mapped"""
         test_params = {"input": "Hello world", "temperature": 0.7, "stream": True}

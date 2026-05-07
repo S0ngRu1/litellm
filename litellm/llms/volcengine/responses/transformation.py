@@ -450,6 +450,7 @@ class VolcEngineResponsesAPIConfig(OpenAIResponsesAPIConfig):
         model: Optional[str],
         stream: Optional[bool],
         custom_llm_provider: Optional[str] = None,
+        litellm_params: Optional[Any] = None,
     ) -> bool:
         """
         Volcengine Responses API supports native streaming; never fall back to fake stream.

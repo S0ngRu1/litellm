@@ -2445,13 +2445,45 @@ def supports_url_context(model: str, custom_llm_provider: Optional[str] = None) 
     )
 
 
-def supports_native_streaming(model: str, custom_llm_provider: Optional[str]) -> bool:
+def _parse_supports_native_streaming_override(override: Any) -> Optional[bool]:
+    """
+    Normalize ``supports_native_streaming`` from deployment config (YAML/JSON/UI).
+
+    Avoid ``bool("false") is True``; return ``None`` when the value is not a
+    recognized boolean so callers fall back to ``model_cost``.
+    """
+    if override is None:
+        return None
+    if isinstance(override, bool):
+        return override
+    if isinstance(override, str):
+        v = override.strip().lower()
+        if v in ("true", "1", "yes", "on"):
+            return True
+        if v in ("false", "0", "no", "off"):
+            return False
+        return None
+    if type(override) is int and override in (0, 1):
+        return bool(override)
+    return None
+
+
+def supports_native_streaming(
+    model: str,
+    custom_llm_provider: Optional[str],
+    deployment_model_info: Optional[Dict[str, Any]] = None,
+) -> bool:
     """
     Check if the given model supports native streaming and return a boolean value.
+
+    When ``deployment_model_info`` is provided (e.g. proxy ``model_list`` /
+    ``GenericLiteLLMParams.model_info``) and contains ``supports_native_streaming``,
+    that value overrides ``litellm.model_cost`` / ``model_prices_and_context_window.json``.
 
     Parameters:
     model (str): The model name to be checked.
     custom_llm_provider (str): The provider to be checked.
+    deployment_model_info (dict, optional): Deployment-level overrides from config.
 
     Returns:
     bool: True if the model supports native streaming, False otherwise.
@@ -2459,6 +2491,12 @@ def supports_native_streaming(model: str, custom_llm_provider: Optional[str]) ->
     Raises:
     Exception: If the given model is not found in model_prices_and_context_window.json.
     """
+    if deployment_model_info is not None:
+        override = deployment_model_info.get("supports_native_streaming")
+        parsed = _parse_supports_native_streaming_override(override)
+        if parsed is not None:
+            return parsed
+
     try:
         model, custom_llm_provider, _, _ = litellm.get_llm_provider(
             model=model, custom_llm_provider=custom_llm_provider

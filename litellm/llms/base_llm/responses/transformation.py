@@ -222,6 +222,7 @@ class BaseResponsesAPIConfig(ABC):
         model: Optional[str],
         stream: Optional[bool],
         custom_llm_provider: Optional[str] = None,
+        litellm_params: Optional[Any] = None,
     ) -> bool:
         """Returns True if litellm should fake a stream for the given model and stream value"""
         return False
