@@ -18,6 +18,7 @@ sys.path.insert(
 
 import litellm
 from litellm import Router
+from litellm.types.router import Deployment, LiteLLM_Params, ModelInfo
 
 
 def test_should_not_pollute_shared_key_with_zero_cost_pricing():
@@ -266,3 +267,87 @@ def test_should_preserve_builtin_pricing_regardless_of_deployment_order():
         f"Order should not matter. Expected {builtin_output_cost}, "
         f"got {info_std_2['output_cost_per_token']}"
     )
+
+
+def test_register_litellm_model_cost_for_deployment_explicit_responses_alias():
+    """
+    Explicit call coverage for Router._register_litellm_model_cost_for_deployment
+    (required by tests/code_coverage_tests/router_code_coverage.py AST scan).
+
+    When the backend model name contains ``responses/``, the same shared model_info
+    must be registered under the stripped key so downstream lookups after
+    ``responses_api_bridge_check()`` resolve (e.g. supports_native_streaming).
+    """
+    router = Router(model_list=[])
+    uid = "explicit-register-litellm-cost-8a2f91c4"
+    deployment = Deployment(
+        model_name="explicit-register-model",
+        litellm_params=LiteLLM_Params(
+            model="responses/explicit-cost-model-8a2f91c4",
+            custom_llm_provider="azure",
+            api_key="fake-key-explicit",
+        ),
+        model_info=ModelInfo(id=uid, supports_native_streaming=True),
+    )
+    model_info_dict = deployment.model_info.model_dump(exclude_none=True)
+    router._register_litellm_model_cost_for_deployment(deployment, model_info_dict)
+
+    assert uid in litellm.model_cost
+    assert "azure/responses/explicit-cost-model-8a2f91c4" in litellm.model_cost
+    assert "azure/explicit-cost-model-8a2f91c4" in litellm.model_cost
+    assert litellm.model_cost["azure/explicit-cost-model-8a2f91c4"].get(
+        "supports_native_streaming"
+    ) is True
+
+
+def test_add_deployment_registers_responses_stripped_model_cost_alias():
+    """
+    Runtime add_deployment() should mirror _create_deployment() by registering
+    the responses/-stripped backend key so lookups after
+    responses_api_bridge_check() still resolve model_info.
+    """
+    uid = "dynamic-deployment-responses-alias-9f3c2a1b"
+    router = Router(model_list=[])
+    deployment = Deployment(
+        model_name="dynamic-azure-responses",
+        litellm_params=LiteLLM_Params(
+            model="responses/my-dyn-deployment",
+            custom_llm_provider="azure",
+            api_key="fake-key-dyn",
+        ),
+        model_info=ModelInfo(id=uid, supports_native_streaming=True),
+    )
+    router.add_deployment(deployment=deployment)
+
+    assert uid in litellm.model_cost
+    assert "azure/responses/my-dyn-deployment" in litellm.model_cost
+    assert "azure/my-dyn-deployment" in litellm.model_cost
+    assert litellm.model_cost["azure/my-dyn-deployment"].get(
+        "supports_native_streaming"
+    )
+
+
+def test_add_deployment_updates_existing_responses_stripped_alias():
+    """
+    Stripped alias registration must not skip when the key already exists;
+    otherwise updated deployment flags (e.g. supports_native_streaming) stay stale.
+    """
+    stripped_key = "azure/stale-dyn-responses-7e4d2c9a"
+    litellm.register_model(
+        model_cost={stripped_key: {"supports_native_streaming": False}}
+    )
+
+    uid = "dynamic-deployment-stale-overwrite-4b8a1c3d"
+    router = Router(model_list=[])
+    deployment = Deployment(
+        model_name="stale-azure-responses",
+        litellm_params=LiteLLM_Params(
+            model="responses/stale-dyn-responses-7e4d2c9a",
+            custom_llm_provider="azure",
+            api_key="fake-key-stale",
+        ),
+        model_info=ModelInfo(id=uid, supports_native_streaming=True),
+    )
+    router.add_deployment(deployment=deployment)
+
+    assert litellm.model_cost[stripped_key].get("supports_native_streaming") is True
